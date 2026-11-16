@@ -8,10 +8,10 @@ Crypto news + BTC price bot for Telegram.
 - Posts BTC price alerts every time price crosses a $1,000 level (up or down)
 
 Setup:
-    pip install feedparser requests anthropic
+    pip install feedparser requests google-genai
     export TELEGRAM_BOT_TOKEN="123456:ABC..."
     export TELEGRAM_CHAT_ID="@yourchannel"      # or -100xxxxxxxxxx
-    export ANTHROPIC_API_KEY="sk-ant-..."
+    export GEMINI_API_KEY="AIza..."          # from Google AI Studio
     python crypto_news_bot.py
 """
 import html
@@ -24,14 +24,16 @@ import sys
 import time
 from datetime import datetime, timezone
 
-import anthropic
 import feedparser
 import requests
+from google import genai
+from google.genai import types
 
 # ---------------- CONFIG ----------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-MODEL = "claude-haiku-5-5"
+# If this model name is rejected, try "gemini-2.5-flash" or "gemini-2.5-flash-lite"
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
 PRICE_CHECK_SECONDS = 60      # how often to check BTC price
 NEWS_CHECK_SECONDS = 600      # how often to check news (10 min)
@@ -40,6 +42,8 @@ PRICE_BUFFER = 150            # must pass the level by this much (prevents spam 
 
 SCORE_THRESHOLD = 7           # post news with score >= this (1-10)
 MAX_POSTS_PER_CYCLE = 5       # flood protection
+MAX_SCORED_PER_RUN = 25       # cap LLM calls per run (free-tier rate limits)
+LLM_PAUSE_SECONDS = 4         # pause between LLM calls (~15 requests/min)
 MAX_AGE_HOURS = 12            # ignore older stories
 
 # General outlets: pre-filtered by keywords before calling the LLM (saves cost)
@@ -176,7 +180,17 @@ def check_price():
 
 
 # ---------------- NEWS ----------------
-client = anthropic.Anthropic()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer"},
+        "summary": {"type": "string"},
+        "impact": {"type": "string"},
+    },
+    "required": ["score", "summary", "impact"],
+}
 
 
 def parse_json(text):
@@ -185,18 +199,25 @@ def parse_json(text):
 
 
 def score_item(title, summary, source):
-    try:
-        r = client.messages.create(
-            model=MODEL,
-            max_tokens=300,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user",
-                       "content": f"Source: {source}\nTitle: {title}\nText: {summary[:800]}"}],
-        )
-        return parse_json(r.content[0].text)
-    except Exception as e:
-        print("LLM error:", e)
-        return None
+    prompt = f"Source: {source}\nTitle: {title}\nText: {summary[:800]}"
+    for attempt in range(2):
+        try:
+            r = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                    response_schema=RESPONSE_SCHEMA,
+                    temperature=0,
+                ),
+            )
+            time.sleep(LLM_PAUSE_SECONDS)
+            return parse_json(r.text)
+        except Exception as e:
+            print(f"LLM error (attempt {attempt + 1}): {e}")
+            time.sleep(15)  # likely a rate limit; wait and retry once
+    return None
 
 
 def entry_age_hours(e):
@@ -209,6 +230,7 @@ def entry_age_hours(e):
 
 def check_news(first_run=False):
     posted = 0
+    scored = 0
     all_feeds = [(n, u, False) for n, u in GENERAL_FEEDS.items()] + \
                 [(n, u, True) for n, u in CRYPTO_FEEDS.items()]
 
@@ -223,22 +245,28 @@ def check_news(first_run=False):
             uid = e.get("id") or e.get("link")
             if not uid or is_seen(uid):
                 continue
-            mark_seen(uid)
-            if first_run:      # seed DB on first run so we don't flood the channel
-                continue
-            if entry_age_hours(e) > MAX_AGE_HOURS:
+
+            # first run: record everything, post nothing (avoids flooding the channel)
+            if first_run or entry_age_hours(e) > MAX_AGE_HOURS:
+                mark_seen(uid)
                 continue
 
             title = e.get("title", "")
             summary = re.sub(r"<[^>]+>", "", e.get("summary", ""))
             if not is_crypto_outlet and not KEYWORDS.search(f"{title} {summary}"):
-                continue
-            if posted >= MAX_POSTS_PER_CYCLE:
+                mark_seen(uid)
                 continue
 
-            res = score_item(title, summary, name)
-            if not res:
+            # over the per-run limits: leave unseen so the next run handles it
+            if posted >= MAX_POSTS_PER_CYCLE or scored >= MAX_SCORED_PER_RUN:
                 continue
+
+            scored += 1
+            res = score_item(title, summary, name)
+            if res is None:
+                continue  # LLM failed: leave unseen and retry next run
+            mark_seen(uid)
+
             print(f"[{res.get('score')}] {name}: {title}")
             if res.get("score", 0) >= SCORE_THRESHOLD:
                 msg = (f"📰 <b>{html.escape(title)}</b>\n\n"
@@ -248,7 +276,7 @@ def check_news(first_run=False):
                        f"<a href=\"{html.escape(e.get('link', ''))}\">Read more</a>")
                 if send_telegram(msg):
                     posted += 1
-    print(f"News cycle done, posted {posted}")
+    print(f"News cycle done: scored {scored}, posted {posted}")
 
 
 # ---------------- RUN MODES ----------------
