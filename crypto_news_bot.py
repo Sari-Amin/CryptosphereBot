@@ -29,6 +29,9 @@ import requests
 from google import genai
 from google.genai import types
 
+sys.stdout.reconfigure(line_buffering=True)
+START = time.time()
+
 # ---------------- CONFIG ----------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -44,6 +47,9 @@ SCORE_THRESHOLD = 7           # post news with score >= this (1-10)
 MAX_POSTS_PER_CYCLE = 5       # flood protection
 MAX_SCORED_PER_RUN = 25       # cap LLM calls per run (free-tier rate limits)
 LLM_PAUSE_SECONDS = 4         # pause between LLM calls (~15 requests/min)
+TIME_BUDGET_SECONDS = 120     # stop scoring after this long (job timeout is 4 min)
+MAX_LLM_FAILURES = 3          # give up on the LLM for this run after this many errors
+llm_failures = 0
 MAX_AGE_HOURS = 12            # ignore older stories
 
 # General outlets: pre-filtered by keywords before calling the LLM (saves cost)
@@ -180,7 +186,10 @@ def check_price():
 
 
 # ---------------- NEWS ----------------
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+client = genai.Client(
+    api_key=os.environ["GEMINI_API_KEY"],
+    http_options=types.HttpOptions(timeout=30000),  # 30s per request
+)
 
 RESPONSE_SCHEMA = {
     "type": "object",
@@ -199,8 +208,11 @@ def parse_json(text):
 
 
 def score_item(title, summary, source):
+    global llm_failures
     prompt = f"Source: {source}\nTitle: {title}\nText: {summary[:800]}"
     for attempt in range(2):
+        if llm_failures >= MAX_LLM_FAILURES:
+            return None
         try:
             r = client.models.generate_content(
                 model=MODEL,
@@ -215,8 +227,10 @@ def score_item(title, summary, source):
             time.sleep(LLM_PAUSE_SECONDS)
             return parse_json(r.text)
         except Exception as e:
-            print(f"LLM error (attempt {attempt + 1}): {e}")
-            time.sleep(15)  # likely a rate limit; wait and retry once
+            llm_failures += 1
+            print(f"LLM error ({llm_failures}/{MAX_LLM_FAILURES}): {e}")
+            if llm_failures < MAX_LLM_FAILURES:
+                time.sleep(10)
     return None
 
 
@@ -228,6 +242,13 @@ def entry_age_hours(e):
     return (datetime.now(timezone.utc) - ts).total_seconds() / 3600
 
 
+def fetch_feed(url):
+    r = requests.get(url, timeout=10,
+                     headers={"User-Agent": "Mozilla/5.0 (crypto-news-bot)"})
+    r.raise_for_status()
+    return feedparser.parse(r.content)
+
+
 def check_news(first_run=False):
     posted = 0
     scored = 0
@@ -236,7 +257,7 @@ def check_news(first_run=False):
 
     for name, url, is_crypto_outlet in all_feeds:
         try:
-            feed = feedparser.parse(url)
+            feed = fetch_feed(url)
         except Exception as e:
             print(f"Feed failed {name}: {e}")
             continue
@@ -261,6 +282,9 @@ def check_news(first_run=False):
             if posted >= MAX_POSTS_PER_CYCLE or scored >= MAX_SCORED_PER_RUN:
                 continue
 
+            if time.time() - START > TIME_BUDGET_SECONDS or llm_failures >= MAX_LLM_FAILURES:
+                continue  # leave unseen, next run handles it
+
             scored += 1
             res = score_item(title, summary, name)
             if res is None:
@@ -283,7 +307,9 @@ def check_news(first_run=False):
 def run_once():
     """Single pass, for schedulers like GitHub Actions."""
     first_run = get_state("initialized") is None
+    print(f"Run start (first_run={first_run})")
     check_price()
+    print("Price check done")
     check_news(first_run=first_run)
     set_state("initialized", "1")
     # keep the DB small: forget stories older than 14 days
