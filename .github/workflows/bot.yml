@@ -1,0 +1,38 @@
+name: crypto-bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (GitHub may delay runs a bit)
+  workflow_dispatch:         # lets you run it manually from the Actions tab
+
+concurrency:
+  group: crypto-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Keeps bot.db (seen news + last BTC level) between runs
+      - uses: actions/cache@v4
+        with:
+          path: bot.db
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python crypto_news_bot.py --once
