@@ -35,8 +35,9 @@ START = time.time()
 # ---------------- CONFIG ----------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-# If this model name is rejected, try "gemini-2.5-flash" or "gemini-2.5-flash-lite"
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# Fast, cheap model, minimal thinking by default (good for scoring headlines).
+# gemini-2.5-flash is being shut down by Google on Dec 1, 2026, so don't use it.
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 PRICE_CHECK_SECONDS = 60      # how often to check BTC price
 NEWS_CHECK_SECONDS = 600      # how often to check news (10 min)
@@ -134,12 +135,12 @@ def send_telegram(text):
 # ---------------- BTC PRICE ----------------
 def get_btc_price():
     sources = [
-        ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-         lambda j: float(j["price"])),
         ("https://api.coinbase.com/v2/prices/BTC-USD/spot",
          lambda j: float(j["data"]["amount"])),
         ("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
          lambda j: float(j["bitcoin"]["usd"])),
+        ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+         lambda j: float(j["price"])),
     ]
     for url, parse in sources:
         try:
@@ -188,7 +189,7 @@ def check_price():
 # ---------------- NEWS ----------------
 client = genai.Client(
     api_key=os.environ["GEMINI_API_KEY"],
-    http_options=types.HttpOptions(timeout=30000),  # 30s per request
+    http_options=types.HttpOptions(timeout=60000),  # 60s per request
 )
 
 RESPONSE_SCHEMA = {

@@ -2,8 +2,8 @@ name: crypto-bot
 
 on:
   schedule:
-      - cron: "7,22,37,52 * * * *"   # every 15 minutes, off the busy minutes
-  workflow_dispatch:         # lets you run it manually from the Actions tab
+    - cron: "7,22,37,52 * * * *"   # every 15 minutes, off the busy minutes
+  workflow_dispatch:
 
 concurrency:
   group: crypto-bot
@@ -12,7 +12,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +23,6 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Keeps bot.db (seen news + last BTC level) between runs
       - uses: actions/cache@v4
         with:
           path: bot.db
