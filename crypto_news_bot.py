@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
+from dotenv import load_dotenv
 
 import feedparser
 import requests
@@ -33,6 +34,8 @@ sys.stdout.reconfigure(line_buffering=True)
 START = time.time()
 
 # ---------------- CONFIG ----------------
+load_dotenv()
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 # Fast, cheap model, minimal thinking by default (good for scoring headlines).
